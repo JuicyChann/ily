@@ -1,0 +1,414 @@
+import React, { useRef, useMemo, useEffect } from 'react';
+import { useFrame } from '@react-three/fiber';
+import * as THREE from 'three';
+import { useStore, PatternType } from '../../store/useStore';
+
+const tempObject = new THREE.Object3D();
+const tempColor = new THREE.Color();
+
+// Helper to generate text positions using a canvas
+const generateTextPositions = (text: string, count: number) => {
+  const canvas = document.createElement('canvas');
+  const width = 200;
+  const height = 50;
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return new Float32Array(count * 3);
+
+  ctx.fillStyle = 'black';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 40px Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, width / 2, height / 2);
+
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+  const validPoints: {x: number, y: number}[] = [];
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (data[i] > 128) { // Red channel > 128
+        validPoints.push({ x, y });
+      }
+    }
+  }
+
+  const positions = new Float32Array(count * 3);
+  if (validPoints.length === 0) return positions;
+
+  for (let i = 0; i < count; i++) {
+    // Randomly sample from valid points
+    const pt = validPoints[Math.floor(Math.random() * validPoints.length)];
+    
+    // Normalize to -5 to 5 range approx
+    const x = (pt.x / width - 0.5) * 10;
+    const y = -(pt.y / height - 0.5) * 2.5; // Flip Y
+    const z = (Math.random() - 0.5) * 0.5; // Thin layer
+    
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+  }
+  
+  return positions;
+};
+
+const generatePositions = (count: number, pattern: PatternType) => {
+  const positions = new Float32Array(count * 3);
+  
+  for (let i = 0; i < count; i++) {
+    let x = 0, y = 0, z = 0;
+    
+    if (pattern === 'sphere') {
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      const r = 4 * Math.cbrt(Math.random()); 
+      x = r * Math.sin(phi) * Math.cos(theta);
+      y = r * Math.sin(phi) * Math.sin(theta);
+      z = r * Math.cos(phi);
+    } else if (pattern === 'cube') {
+      x = (Math.random() - 0.5) * 8;
+      y = (Math.random() - 0.5) * 8;
+      z = (Math.random() - 0.5) * 8;
+    } else if (pattern === 'torus') {
+      const u = Math.random() * Math.PI * 2;
+      const v = Math.random() * Math.PI * 2;
+      const R = 3;
+      const r = 1;
+      x = (R + r * Math.cos(v)) * Math.cos(u);
+      y = (R + r * Math.cos(v)) * Math.sin(u);
+      z = r * Math.sin(v);
+    } else if (pattern === 'galaxy') {
+      const arms = 3;
+      const armAngle = (Math.random() * Math.PI * 2) / arms;
+      const spin = Math.random() * 5; 
+      const r = Math.random() * 5;
+      const angle = spin * r + armAngle; 
+      
+      x = r * Math.cos(angle) + (Math.random() - 0.5);
+      y = (Math.random() - 0.5) * 0.5; 
+      z = r * Math.sin(angle) + (Math.random() - 0.5);
+    } else if (pattern === 'heart') {
+      const t = Math.random() * Math.PI * 2;
+      const scale = 0.25; 
+      x = scale * (16 * Math.pow(Math.sin(t), 3));
+      y = scale * (13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t));
+      z = (Math.random() - 0.5) * 2; 
+      
+      const r = Math.random();
+      x *= r;
+      y *= r;
+      z *= r;
+    }
+    
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+  }
+  
+  return positions;
+};
+
+const ParticleSystem: React.FC = () => {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const { gestureFactor, pattern, color, particleCount, isHandDetected, gestureLabel } = useStore();
+  
+  // Determine effective pattern
+  // Priority: 
+  // 1. Peace Sign -> "I LOVE YOU" text
+  // 2. No Hand -> Heart
+  // 3. Hand Detected -> Selected Pattern
+  
+  const isPeaceSign = gestureLabel === "I Love You ❤️";
+  
+  // Memoize positions for different states
+  const standardPositions = useMemo(() => generatePositions(particleCount, pattern), [particleCount, pattern]);
+  const heartPositions = useMemo(() => generatePositions(particleCount, 'heart'), [particleCount]);
+  const textPositions = useMemo(() => generateTextPositions("I LOVE YOU", particleCount), [particleCount]);
+  
+  const currentFactor = useRef(gestureFactor);
+
+  useFrame((state, delta) => {
+    if (!meshRef.current) return;
+
+    // Target Factor Logic
+    // If Peace Sign or No Hand, we want full expansion (1)
+    // Otherwise use gestureFactor
+    const targetFactor = (isPeaceSign || !isHandDetected) ? 1 : gestureFactor;
+    currentFactor.current = THREE.MathUtils.lerp(currentFactor.current, targetFactor, delta * 5);
+    
+    const time = state.clock.getElapsedTime();
+    const factor = currentFactor.current;
+    
+    // Determine which position array to use as target
+    let activePositions = standardPositions;
+    if (isPeaceSign) {
+      activePositions = textPositions;
+    } else if (!isHandDetected) {
+      activePositions = heartPositions;
+    }
+    
+    for (let i = 0; i < particleCount; i++) {
+      const ix = i * 3;
+      const tx = activePositions[ix];
+      const ty = activePositions[ix + 1];
+      const tz = activePositions[ix + 2];
+      
+      let x = tx * factor;
+      let y = ty * factor;
+      let z = tz * factor;
+      
+      // Add noise only if NOT text (text needs to be readable)
+      if (factor > 0.1 && !isPeaceSign) {
+        const noise = Math.sin(time + i) * 0.1 * factor;
+        x += noise;
+        y += noise;
+        z += noise;
+      }
+      
+      // Rotation
+      // If Text, no rotation or slow rotation
+      // If Heart (No Hand), spin
+      // If Standard, spin based on factor
+      
+      let rx = x;
+      let rz = z;
+      
+      if (!isPeaceSign) {
+        const rotSpeed = 0.1 * (1 - factor) + 0.05;
+        const cosR = Math.cos(time * rotSpeed);
+        const sinR = Math.sin(time * rotSpeed);
+        rx = x * cosR - z * sinR;
+        rz = x * sinR + z * cosR;
+      }
+      
+      tempObject.position.set(rx, y, rz);
+      
+      // Scale
+      const scale = 0.05 + 0.05 * factor + 0.02 * Math.sin(time * 2 + i);
+      tempObject.scale.set(scale, scale, scale);
+      
+      // Rotation of particles
+      if (!isHandDetected) {
+        tempObject.rotation.set(time + i, time + i, 0);
+      } else {
+        tempObject.rotation.set(0, 0, 0);
+      }
+      
+      tempObject.updateMatrix();
+      meshRef.current.setMatrixAt(i, tempObject.matrix);
+    }
+    
+    meshRef.current.instanceMatrix.needsUpdate = true;
+    
+    tempColor.set(color);
+    meshRef.current.material.color.lerp(tempColor, delta * 2);
+  });
+
+  return (
+    <instancedMesh ref={meshRef} args={[undefined, undefined, particleCount]}>
+      {/* Switch geometry */}
+      {isHandDetected ? (
+        <sphereGeometry args={[1, 8, 8]} />
+      ) : (
+        <octahedronGeometry args={[1, 0]} /> 
+      )}
+      <meshStandardMaterial 
+        color={color} 
+        roughness={0.4} 
+        metalness={0.6}
+        emissive={color}
+        emissiveIntensity={0.2}
+      />
+    </instancedMesh>
+  );
+};
+
+export default ParticleSystem;
+        import React, { useEffect, useRef, useState } from 'react';
+import { Hands, Results } from '@mediapipe/hands';
+import { Camera } from '@mediapipe/camera_utils';
+import { useStore } from '../store/useStore';
+
+const GestureController: React.FC = () => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const { setGestureFactor, showCamera, setGestureLabel, setIsHandDetected } = useStore();
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!videoRef.current || !canvasRef.current) return;
+
+    const hands = new Hands({
+      locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+      },
+    });
+
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+
+    hands.onResults(onResults);
+
+    const camera = new Camera(videoRef.current, {
+      onFrame: async () => {
+        if (videoRef.current) {
+          await hands.send({ image: videoRef.current });
+        }
+      },
+      width: 640,
+      height: 480,
+    });
+
+    camera.start()
+      .then(() => setIsLoaded(true))
+      .catch(err => console.error("Camera start error:", err));
+
+    return () => {
+      if (videoRef.current && videoRef.current.srcObject) {
+        const stream = videoRef.current.srcObject as MediaStream;
+        stream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, []);
+
+  const isFingerExtended = (landmarks: any[], tipIdx: number, pipIdx: number, wrist: any) => {
+    // Simple check: distance from wrist to tip > distance from wrist to pip
+    const tip = landmarks[tipIdx];
+    const pip = landmarks[pipIdx];
+    
+    const dTip = Math.hypot(tip.x - wrist.x, tip.y - wrist.y, tip.z - wrist.z);
+    const dPip = Math.hypot(pip.x - wrist.x, pip.y - wrist.y, pip.z - wrist.z);
+    
+    return dTip > dPip;
+  };
+
+  const onResults = (results: Results) => {
+    if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+      setGestureLabel(null);
+      setIsHandDetected(false);
+      return;
+    }
+
+    setIsHandDetected(true);
+    const landmarks = results.multiHandLandmarks[0];
+    const wrist = landmarks[0];
+    
+    // Finger Indices
+    // Thumb: 4 (Tip), 2 (MCP) - Thumb is special
+    // Index: 8 (Tip), 6 (PIP)
+    // Middle: 12 (Tip), 10 (PIP)
+    // Ring: 16 (Tip), 14 (PIP)
+    // Pinky: 20 (Tip), 18 (PIP)
+
+    const indexExt = isFingerExtended(landmarks, 8, 6, wrist);
+    const middleExt = isFingerExtended(landmarks, 12, 10, wrist);
+    const ringExt = isFingerExtended(landmarks, 16, 14, wrist);
+    const pinkyExt = isFingerExtended(landmarks, 20, 18, wrist);
+
+    // Thumb extended check (a bit different, check angle or distance from index MCP)
+    // For simplicity, let's check distance from wrist compared to Index MCP
+    const thumbTip = landmarks[4];
+    const indexMCP = landmarks[5];
+    const dThumb = Math.hypot(thumbTip.x - wrist.x, thumbTip.y - wrist.y);
+    const dIndexMCP = Math.hypot(indexMCP.x - wrist.x, indexMCP.y - wrist.y);
+    const thumbExt = dThumb > dIndexMCP * 1.2; // Heuristic
+
+    // Detect Peace Sign (Victory)
+    // Index & Middle Extended, Ring & Pinky Folded
+    const isPeace = indexExt && middleExt && !ringExt && !pinkyExt;
+
+    // Detect OK Sign
+    // Index Tip and Thumb Tip close
+    // Middle, Ring, Pinky Extended
+    const dIndexThumb = Math.hypot(landmarks[8].x - landmarks[4].x, landmarks[8].y - landmarks[4].y);
+    const isOK = dIndexThumb < 0.05 && middleExt && ringExt && pinkyExt;
+
+    if (isPeace) {
+      setGestureLabel("I Love You ❤️");
+    } else if (isOK) {
+      setGestureLabel("🙄"); 
+    } else {
+      setGestureLabel(null);
+    }
+
+    // Existing Open/Close Logic
+    const tips = [8, 12, 16, 20];
+    let totalDist = 0;
+    tips.forEach(idx => {
+      const tip = landmarks[idx];
+      const dist = Math.sqrt(
+        Math.pow(tip.x - wrist.x, 2) + 
+        Math.pow(tip.y - wrist.y, 2) + 
+        Math.pow(tip.z - wrist.z, 2)
+      );
+      totalDist += dist;
+    });
+    
+    const avgDist = totalDist / 4;
+    const minVal = 0.15;
+    const maxVal = 0.4;
+    let factor = (avgDist - minVal) / (maxVal - minVal);
+    factor = Math.max(0, Math.min(1, factor));
+    setGestureFactor(factor);
+
+    // Draw
+    if (canvasRef.current && showCamera) {
+      const ctx = canvasRef.current.getContext('2d');
+      if (ctx) {
+        ctx.save();
+        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        ctx.drawImage(results.image, 0, 0, canvasRef.current.width, canvasRef.current.height);
+        
+        ctx.fillStyle = isPeace ? '#00ff00' : (isOK ? '#ffff00' : 'red');
+        const w = canvasRef.current.width;
+        const h = canvasRef.current.height;
+        
+        [0, ...tips, 4].forEach(idx => {
+            const pt = landmarks[idx];
+            ctx.beginPath();
+            ctx.arc(pt.x * w, pt.y * h, 5, 0, 2 * Math.PI);
+            ctx.fill();
+        });
+        
+        ctx.restore();
+      }
+    }
+  };
+
+  return (
+    <div className={`fixed bottom-4 right-4 z-50 transition-opacity duration-300 ${showCamera ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+      <div className="relative rounded-lg overflow-hidden border-2 border-white/20 shadow-lg bg-black/50 backdrop-blur-sm">
+        <video 
+          ref={videoRef} 
+          className="hidden" 
+          playsInline
+        />
+        <canvas 
+          ref={canvasRef}
+          width={320}
+          height={240}
+          className="w-40 h-32 md:w-64 md:h-48 object-cover transform -scale-x-100" 
+        />
+        {!isLoaded && (
+          <div className="absolute inset-0 flex items-center justify-center text-white text-xs">
+            Loading Camera...
+          </div>
+        )}
+        <div className="absolute bottom-1 left-1 text-[10px] text-white/70 px-1 bg-black/30 rounded">
+          Hand Tracking Active
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default GestureController;
